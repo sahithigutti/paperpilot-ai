@@ -84,32 +84,6 @@ paperpilot-ai/
 
 ---
 
-## 📸 Screenshots
-
-### 1. Frontend
-
-![Frontend](assets/01.frontend.png)
-
----
-
-### 2. Chat Interface
-
-![Chat Interface](assets/02.chat.png)
-
----
-
-### 3. AI Response
-
-![AI Response](assets/03.response.png)
-
----
-
-### 4. Backend
-
-![Backend](assets/04.backend.png)
-
----
-
 ## 💻 Installation
 
 ### Clone the Repository
@@ -157,15 +131,5 @@ npm run dev
 
 ---
 
-## 🎯 Future Improvements
-
-* Multiple document support in a single conversation
-* User authentication
-* Conversation export
-* Streaming AI responses
-* Cloud database integration
-* Docker deployment
-
----
 
 
