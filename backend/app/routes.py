@@ -41,12 +41,16 @@ async def upload_pdf(file: UploadFile = File(...)):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
 
         # Get only the filename
-        filename = os.path.basename(file.filename)
+        original_filename = os.path.basename(file.filename)
 
         # Clean filename
-        filename = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+        filename = re.sub(
+            r"[^a-zA-Z0-9._-]",
+            "_",
+            original_filename
+        )
 
-        # Make sure it is a PDF
+        # Make sure file is a PDF
         if not filename.lower().endswith(".pdf"):
             raise HTTPException(
                 status_code=400,
@@ -54,16 +58,33 @@ async def upload_pdf(file: UploadFile = File(...)):
             )
 
         # Full file path
-        file_path = os.path.join(UPLOAD_DIR, filename)
+        file_path = os.path.join(
+            UPLOAD_DIR,
+            filename
+        )
 
-        # Save uploaded file
+        # -------------------------------------------------
+        # Save uploaded PDF
+        # -------------------------------------------------
+
         with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            shutil.copyfileobj(
+                file.file,
+                buffer
+            )
 
+        # -------------------------------------------------
         # Calculate SHA-256 hash
-        file_hash = calculate_file_hash(file_path)
+        # -------------------------------------------------
 
+        file_hash = calculate_file_hash(
+            file_path
+        )
+
+        # -------------------------------------------------
         # Check if PDF already exists
+        # -------------------------------------------------
+
         existing_pdf = (
             db.query(PDF)
             .filter(PDF.file_hash == file_hash)
@@ -71,7 +92,8 @@ async def upload_pdf(file: UploadFile = File(...)):
         )
 
         if existing_pdf:
-            # Remove newly uploaded duplicate file
+
+            # Remove duplicate uploaded file
             if os.path.exists(file_path):
                 os.remove(file_path)
 
@@ -81,13 +103,26 @@ async def upload_pdf(file: UploadFile = File(...)):
                 "filename": existing_pdf.filename
             }
 
+        # -------------------------------------------------
         # Extract text from PDF
-        extracted_text = extract_text_from_pdf(file_path)
+        # -------------------------------------------------
 
+        extracted_text = extract_text_from_pdf(
+            file_path
+        )
+
+        # -------------------------------------------------
         # Split text into chunks
-        chunks = split_text_into_chunks(extracted_text)
+        # -------------------------------------------------
 
-        # Create PDF record
+        chunks = split_text_into_chunks(
+            extracted_text
+        )
+
+        # -------------------------------------------------
+        # Create PDF database record
+        # -------------------------------------------------
+
         pdf_record = PDF(
             filename=filename,
             file_hash=file_hash,
@@ -98,10 +133,15 @@ async def upload_pdf(file: UploadFile = File(...)):
         db.commit()
         db.refresh(pdf_record)
 
-        # Save each chunk with embedding
+        # -------------------------------------------------
+        # Save chunks and embeddings
+        # -------------------------------------------------
+
         for index, chunk in enumerate(chunks):
 
-            embedding = get_embedding(chunk)
+            embedding = get_embedding(
+                chunk
+            )
 
             chunk_record = PDFChunk(
                 pdf_id=pdf_record.id,
@@ -114,6 +154,10 @@ async def upload_pdf(file: UploadFile = File(...)):
 
         db.commit()
 
+        # -------------------------------------------------
+        # Success response
+        # -------------------------------------------------
+
         return {
             "message": "PDF uploaded successfully!",
             "pdf_id": pdf_record.id,
@@ -124,12 +168,18 @@ async def upload_pdf(file: UploadFile = File(...)):
         raise
 
     except Exception as e:
+
+        # Rollback database changes
         db.rollback()
 
-        # Remove partially uploaded file if something fails
+        # Remove partially uploaded file
         try:
-            if "file_path" in locals() and os.path.exists(file_path):
+            if (
+                "file_path" in locals()
+                and os.path.exists(file_path)
+            ):
                 os.remove(file_path)
+
         except Exception:
             pass
 
@@ -148,9 +198,15 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 @router.post("/chat")
 async def chat(request: ChatRequest):
+
     db = SessionLocal()
 
     try:
+
+        # -------------------------------------------------
+        # Find PDF
+        # -------------------------------------------------
+
         pdf = (
             db.query(PDF)
             .filter(PDF.id == request.pdf_id)
@@ -163,7 +219,10 @@ async def chat(request: ChatRequest):
                 detail="PDF not found."
             )
 
+        # -------------------------------------------------
         # Save user's message
+        # -------------------------------------------------
+
         user_message = ChatMessage(
             pdf_id=pdf.id,
             role="user",
@@ -173,52 +232,88 @@ async def chat(request: ChatRequest):
         db.add(user_message)
         db.commit()
 
-        # Generate embedding for question
-        question_embedding = get_embedding(request.question)
+        # -------------------------------------------------
+        # Generate question embedding
+        # -------------------------------------------------
 
-        # Get all chunks for this PDF
+        question_embedding = get_embedding(
+            request.question
+        )
+
+        # -------------------------------------------------
+        # Get PDF chunks
+        # -------------------------------------------------
+
         chunks = (
             db.query(PDFChunk)
-            .filter(PDFChunk.pdf_id == pdf.id)
+            .filter(
+                PDFChunk.pdf_id == pdf.id
+            )
             .all()
         )
 
+        # -------------------------------------------------
         # Calculate similarity
+        # -------------------------------------------------
+
         scores = []
 
         for chunk in chunks:
 
-            chunk_embedding = json.loads(chunk.embedding)
+            chunk_embedding = json.loads(
+                chunk.embedding
+            )
 
             similarity = cosine_similarity(
                 question_embedding,
                 chunk_embedding
             )
 
-            scores.append((similarity, chunk))
+            scores.append(
+                (similarity, chunk)
+            )
 
+        # -------------------------------------------------
         # Sort by similarity
+        # -------------------------------------------------
+
         scores.sort(
             key=lambda x: x[0],
             reverse=True
         )
 
-        # Get top 3 chunks
+        # -------------------------------------------------
+        # Get top 3 relevant chunks
+        # -------------------------------------------------
+
         top_chunks = scores[:3]
 
+        # -------------------------------------------------
         # Build context
+        # -------------------------------------------------
+
         context = ""
 
         for _, chunk in top_chunks:
-            context += chunk.chunk_text + "\n\n"
 
+            context += (
+                chunk.chunk_text
+                + "\n\n"
+            )
+
+        # -------------------------------------------------
         # Ask Gemini
+        # -------------------------------------------------
+
         answer = ask_question(
             context,
             request.question
         )
 
-        # Save assistant reply
+        # -------------------------------------------------
+        # Save assistant response
+        # -------------------------------------------------
+
         assistant_message = ChatMessage(
             pdf_id=pdf.id,
             role="assistant",
@@ -227,6 +322,10 @@ async def chat(request: ChatRequest):
 
         db.add(assistant_message)
         db.commit()
+
+        # -------------------------------------------------
+        # Return response
+        # -------------------------------------------------
 
         return {
             "pdf_id": pdf.id,
@@ -245,10 +344,15 @@ async def chat(request: ChatRequest):
 
 @router.delete("/delete/{pdf_id}")
 async def delete_pdf(pdf_id: int):
+
     db = SessionLocal()
 
     try:
+
+        # -------------------------------------------------
         # Find PDF
+        # -------------------------------------------------
+
         pdf = (
             db.query(PDF)
             .filter(PDF.id == pdf_id)
@@ -261,17 +365,26 @@ async def delete_pdf(pdf_id: int):
                 detail="PDF not found."
             )
 
-        # Delete chunks
+        # -------------------------------------------------
+        # Delete PDF chunks
+        # -------------------------------------------------
+
         db.query(PDFChunk).filter(
             PDFChunk.pdf_id == pdf.id
         ).delete()
 
+        # -------------------------------------------------
         # Delete chat messages
+        # -------------------------------------------------
+
         db.query(ChatMessage).filter(
             ChatMessage.pdf_id == pdf.id
         ).delete()
 
+        # -------------------------------------------------
         # Delete PDF file
+        # -------------------------------------------------
+
         file_path = os.path.join(
             UPLOAD_DIR,
             pdf.filename
@@ -280,7 +393,10 @@ async def delete_pdf(pdf_id: int):
         if os.path.exists(file_path):
             os.remove(file_path)
 
-        # Delete database record
+        # -------------------------------------------------
+        # Delete PDF database record
+        # -------------------------------------------------
+
         db.delete(pdf)
 
         db.commit()
@@ -299,9 +415,11 @@ async def delete_pdf(pdf_id: int):
 
 @router.get("/pdfs")
 async def get_pdfs():
+
     db = SessionLocal()
 
     try:
+
         pdfs = db.query(PDF).all()
 
         return [
@@ -322,9 +440,11 @@ async def get_pdfs():
 
 @router.get("/pdf/{pdf_id}")
 async def get_pdf(pdf_id: int):
+
     db = SessionLocal()
 
     try:
+
         pdf = (
             db.query(PDF)
             .filter(PDF.id == pdf_id)
@@ -352,9 +472,15 @@ async def get_pdf(pdf_id: int):
 
 @router.get("/chat/{pdf_id}")
 async def get_chat_history(pdf_id: int):
+
     db = SessionLocal()
 
     try:
+
+        # -------------------------------------------------
+        # Check PDF exists
+        # -------------------------------------------------
+
         pdf = (
             db.query(PDF)
             .filter(PDF.id == pdf_id)
@@ -367,12 +493,24 @@ async def get_chat_history(pdf_id: int):
                 detail="PDF not found."
             )
 
+        # -------------------------------------------------
+        # Get chat messages
+        # -------------------------------------------------
+
         messages = (
             db.query(ChatMessage)
-            .filter(ChatMessage.pdf_id == pdf_id)
-            .order_by(ChatMessage.created_at)
+            .filter(
+                ChatMessage.pdf_id == pdf_id
+            )
+            .order_by(
+                ChatMessage.created_at
+            )
             .all()
         )
+
+        # -------------------------------------------------
+        # Return chat history
+        # -------------------------------------------------
 
         return [
             {
