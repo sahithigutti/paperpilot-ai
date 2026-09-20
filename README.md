@@ -3,6 +3,9 @@
 **PaperPilot AI** is an AI-powered PDF question-answering application that enables users to upload PDF documents and ask questions about their contents using natural language. The application uses Retrieval-Augmented Generation (RAG), semantic search, embeddings, and Google's Gemini Large Language Model (LLM) to provide context-aware answers based on the uploaded document.
 
 ---
+## 🚀 Live Demo
+
+[Open PaperPilot AI](https://paperpilot-ai-frontend.onrender.com)
 
 ## 🚀 Features
 
