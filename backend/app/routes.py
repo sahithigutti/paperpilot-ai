@@ -1,8 +1,10 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 import shutil
 import json
-from app.similarity_utils import cosine_similarity
 import os
+import re
+
+from app.similarity_utils import cosine_similarity
 from app.chunk_utils import split_text_into_chunks
 from app.pdf_utils import extract_text_from_pdf
 from app.gemini import ask_question
@@ -16,12 +18,43 @@ from app.hash_utils import calculate_file_hash
 router = APIRouter()
 
 
+# =========================================================
+# UPLOAD DIRECTORY
+# =========================================================
+
+UPLOAD_DIR = os.path.join(os.getcwd(), "uploads")
+
+# Create uploads folder if it does not exist
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+# =========================================================
+# UPLOAD PDF
+# =========================================================
+
 @router.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     db = SessionLocal()
 
     try:
-        file_path = f"uploads/{file.filename}"
+        # Make sure uploads folder exists
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+        # Get only the filename
+        filename = os.path.basename(file.filename)
+
+        # Clean filename
+        filename = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+
+        # Make sure it is a PDF
+        if not filename.lower().endswith(".pdf"):
+            raise HTTPException(
+                status_code=400,
+                detail="Only PDF files are allowed."
+            )
+
+        # Full file path
+        file_path = os.path.join(UPLOAD_DIR, filename)
 
         # Save uploaded file
         with open(file_path, "wb") as buffer:
@@ -31,9 +64,17 @@ async def upload_pdf(file: UploadFile = File(...)):
         file_hash = calculate_file_hash(file_path)
 
         # Check if PDF already exists
-        existing_pdf = db.query(PDF).filter(PDF.file_hash == file_hash).first()
+        existing_pdf = (
+            db.query(PDF)
+            .filter(PDF.file_hash == file_hash)
+            .first()
+        )
 
         if existing_pdf:
+            # Remove newly uploaded duplicate file
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
             return {
                 "message": "PDF already exists.",
                 "pdf_id": existing_pdf.id,
@@ -48,7 +89,7 @@ async def upload_pdf(file: UploadFile = File(...)):
 
         # Create PDF record
         pdf_record = PDF(
-            filename=file.filename,
+            filename=filename,
             file_hash=file_hash,
             extracted_text=extracted_text
         )
@@ -57,7 +98,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         db.commit()
         db.refresh(pdf_record)
 
-        # Save each chunk with its embedding
+        # Save each chunk with embedding
         for index, chunk in enumerate(chunks):
 
             embedding = get_embedding(chunk)
@@ -79,16 +120,42 @@ async def upload_pdf(file: UploadFile = File(...)):
             "filename": pdf_record.filename
         }
 
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        db.rollback()
+
+        # Remove partially uploaded file if something fails
+        try:
+            if "file_path" in locals() and os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
     finally:
         db.close()
 
+
+# =========================================================
+# CHAT
+# =========================================================
 
 @router.post("/chat")
 async def chat(request: ChatRequest):
     db = SessionLocal()
 
     try:
-        pdf = db.query(PDF).filter(PDF.id == request.pdf_id).first()
+        pdf = (
+            db.query(PDF)
+            .filter(PDF.id == request.pdf_id)
+            .first()
+        )
 
         if not pdf:
             raise HTTPException(
@@ -106,18 +173,21 @@ async def chat(request: ChatRequest):
         db.add(user_message)
         db.commit()
 
-        # Generate embedding for the user's question
+        # Generate embedding for question
         question_embedding = get_embedding(request.question)
 
         # Get all chunks for this PDF
-        chunks = db.query(PDFChunk).filter(
-            PDFChunk.pdf_id == pdf.id
-        ).all()
+        chunks = (
+            db.query(PDFChunk)
+            .filter(PDFChunk.pdf_id == pdf.id)
+            .all()
+        )
 
-        # Calculate similarity scores
+        # Calculate similarity
         scores = []
 
         for chunk in chunks:
+
             chunk_embedding = json.loads(chunk.embedding)
 
             similarity = cosine_similarity(
@@ -133,7 +203,7 @@ async def chat(request: ChatRequest):
             reverse=True
         )
 
-        # Get top 3 most relevant chunks
+        # Get top 3 chunks
         top_chunks = scores[:3]
 
         # Build context
@@ -148,7 +218,7 @@ async def chat(request: ChatRequest):
             request.question
         )
 
-        # Save assistant's reply
+        # Save assistant reply
         assistant_message = ChatMessage(
             pdf_id=pdf.id,
             role="assistant",
@@ -168,13 +238,22 @@ async def chat(request: ChatRequest):
     finally:
         db.close()
 
+
+# =========================================================
+# DELETE PDF
+# =========================================================
+
 @router.delete("/delete/{pdf_id}")
 async def delete_pdf(pdf_id: int):
     db = SessionLocal()
 
     try:
-        # Find the PDF
-        pdf = db.query(PDF).filter(PDF.id == pdf_id).first()
+        # Find PDF
+        pdf = (
+            db.query(PDF)
+            .filter(PDF.id == pdf_id)
+            .first()
+        )
 
         if not pdf:
             raise HTTPException(
@@ -182,26 +261,28 @@ async def delete_pdf(pdf_id: int):
                 detail="PDF not found."
             )
 
-        # Delete all chunks belonging to this PDF
+        # Delete chunks
         db.query(PDFChunk).filter(
             PDFChunk.pdf_id == pdf.id
         ).delete()
 
-        # Delete all chat messages belonging to this PDF
+        # Delete chat messages
         db.query(ChatMessage).filter(
             ChatMessage.pdf_id == pdf.id
         ).delete()
 
-        # Delete the PDF file from uploads folder
-        file_path = f"uploads/{pdf.filename}"
+        # Delete PDF file
+        file_path = os.path.join(
+            UPLOAD_DIR,
+            pdf.filename
+        )
 
         if os.path.exists(file_path):
             os.remove(file_path)
 
-        # Delete the PDF record
+        # Delete database record
         db.delete(pdf)
 
-        # Save changes
         db.commit()
 
         return {
@@ -210,6 +291,11 @@ async def delete_pdf(pdf_id: int):
 
     finally:
         db.close()
+
+
+# =========================================================
+# GET ALL PDFs
+# =========================================================
 
 @router.get("/pdfs")
 async def get_pdfs():
@@ -228,12 +314,22 @@ async def get_pdfs():
 
     finally:
         db.close()
+
+
+# =========================================================
+# GET SINGLE PDF
+# =========================================================
+
 @router.get("/pdf/{pdf_id}")
 async def get_pdf(pdf_id: int):
     db = SessionLocal()
 
     try:
-        pdf = db.query(PDF).filter(PDF.id == pdf_id).first()
+        pdf = (
+            db.query(PDF)
+            .filter(PDF.id == pdf_id)
+            .first()
+        )
 
         if not pdf:
             raise HTTPException(
@@ -249,12 +345,21 @@ async def get_pdf(pdf_id: int):
     finally:
         db.close()
 
+
+# =========================================================
+# GET CHAT HISTORY
+# =========================================================
+
 @router.get("/chat/{pdf_id}")
 async def get_chat_history(pdf_id: int):
     db = SessionLocal()
 
     try:
-        pdf = db.query(PDF).filter(PDF.id == pdf_id).first()
+        pdf = (
+            db.query(PDF)
+            .filter(PDF.id == pdf_id)
+            .first()
+        )
 
         if not pdf:
             raise HTTPException(
